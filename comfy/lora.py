@@ -1,4 +1,5 @@
 import comfy.utils
+import logging
 
 LORA_CLIP_MAP = {
     "mlp.fc1": "mlp_fc1",
@@ -20,8 +21,15 @@ def load_lora(lora, to_load):
             alpha = lora[alpha_name].item()
             loaded_keys.add(alpha_name)
 
+        dora_scale_name = "{}.dora_scale".format(x)
+        dora_scale = None
+        if dora_scale_name in lora.keys():
+            dora_scale = lora[dora_scale_name]
+            loaded_keys.add(dora_scale_name)
+
         regular_lora = "{}.lora_up.weight".format(x)
         diffusers_lora = "{}_lora.up.weight".format(x)
+        diffusers2_lora = "{}.lora_B.weight".format(x)
         transformers_lora = "{}.lora_linear_layer.up.weight".format(x)
         A_name = None
 
@@ -33,6 +41,10 @@ def load_lora(lora, to_load):
             A_name = diffusers_lora
             B_name = "{}_lora.down.weight".format(x)
             mid_name = None
+        elif diffusers2_lora in lora.keys():
+            A_name = diffusers2_lora
+            B_name = "{}.lora_A.weight".format(x)
+            mid_name = None
         elif transformers_lora in lora.keys():
             A_name = transformers_lora
             B_name ="{}.lora_linear_layer.down.weight".format(x)
@@ -43,7 +55,7 @@ def load_lora(lora, to_load):
             if mid_name is not None and mid_name in lora.keys():
                 mid = lora[mid_name]
                 loaded_keys.add(mid_name)
-            patch_dict[to_load[x]] = (lora[A_name], lora[B_name], alpha, mid)
+            patch_dict[to_load[x]] = ("lora", (lora[A_name], lora[B_name], alpha, mid, dora_scale))
             loaded_keys.add(A_name)
             loaded_keys.add(B_name)
 
@@ -64,7 +76,7 @@ def load_lora(lora, to_load):
                 loaded_keys.add(hada_t1_name)
                 loaded_keys.add(hada_t2_name)
 
-            patch_dict[to_load[x]] = (lora[hada_w1_a_name], lora[hada_w1_b_name], alpha, lora[hada_w2_a_name], lora[hada_w2_b_name], hada_t1, hada_t2)
+            patch_dict[to_load[x]] = ("loha", (lora[hada_w1_a_name], lora[hada_w1_b_name], alpha, lora[hada_w2_a_name], lora[hada_w2_b_name], hada_t1, hada_t2, dora_scale))
             loaded_keys.add(hada_w1_a_name)
             loaded_keys.add(hada_w1_b_name)
             loaded_keys.add(hada_w2_a_name)
@@ -116,8 +128,19 @@ def load_lora(lora, to_load):
             loaded_keys.add(lokr_t2_name)
 
         if (lokr_w1 is not None) or (lokr_w2 is not None) or (lokr_w1_a is not None) or (lokr_w2_a is not None):
-            patch_dict[to_load[x]] = (lokr_w1, lokr_w2, alpha, lokr_w1_a, lokr_w1_b, lokr_w2_a, lokr_w2_b, lokr_t2)
+            patch_dict[to_load[x]] = ("lokr", (lokr_w1, lokr_w2, alpha, lokr_w1_a, lokr_w1_b, lokr_w2_a, lokr_w2_b, lokr_t2, dora_scale))
 
+        #glora
+        a1_name = "{}.a1.weight".format(x)
+        a2_name = "{}.a2.weight".format(x)
+        b1_name = "{}.b1.weight".format(x)
+        b2_name = "{}.b2.weight".format(x)
+        if a1_name in lora:
+            patch_dict[to_load[x]] = ("glora", (lora[a1_name], lora[a2_name], lora[b1_name], lora[b2_name], alpha, dora_scale))
+            loaded_keys.add(a1_name)
+            loaded_keys.add(a2_name)
+            loaded_keys.add(b1_name)
+            loaded_keys.add(b2_name)
 
         w_norm_name = "{}.w_norm".format(x)
         b_norm_name = "{}.b_norm".format(x)
@@ -126,26 +149,27 @@ def load_lora(lora, to_load):
 
         if w_norm is not None:
             loaded_keys.add(w_norm_name)
-            patch_dict[to_load[x]] = (w_norm,)
+            patch_dict[to_load[x]] = ("diff", (w_norm,))
             if b_norm is not None:
                 loaded_keys.add(b_norm_name)
-                patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = (b_norm,)
+                patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (b_norm,))
 
         diff_name = "{}.diff".format(x)
         diff_weight = lora.get(diff_name, None)
         if diff_weight is not None:
-            patch_dict[to_load[x]] = (diff_weight,)
+            patch_dict[to_load[x]] = ("diff", (diff_weight,))
             loaded_keys.add(diff_name)
 
         diff_bias_name = "{}.diff_b".format(x)
         diff_bias = lora.get(diff_bias_name, None)
         if diff_bias is not None:
-            patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = (diff_bias,)
+            patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (diff_bias,))
             loaded_keys.add(diff_bias_name)
 
     for x in lora.keys():
         if x not in loaded_keys:
-            print("lora key not loaded", x)
+            logging.warning("lora key not loaded: {}".format(x))
+
     return patch_dict
 
 def model_lora_keys_clip(model, key_map={}):
@@ -186,16 +210,27 @@ def model_lora_keys_clip(model, key_map={}):
                     key_map[lora_key] = k
                     lora_key = "text_encoder.text_model.encoder.layers.{}.{}".format(b, c) #diffusers lora
                     key_map[lora_key] = k
+                    lora_key = "lora_prior_te_text_model_encoder_layers_{}_{}".format(b, LORA_CLIP_MAP[c]) #cascade lora: TODO put lora key prefix in the model config
+                    key_map[lora_key] = k
+
+
+    k = "clip_g.transformer.text_projection.weight"
+    if k in sdk:
+        key_map["lora_prior_te_text_projection"] = k #cascade lora?
+        # key_map["text_encoder.text_projection"] = k #TODO: check if other lora have the text_projection too
+        # key_map["lora_te_text_projection"] = k
 
     return key_map
 
 def model_lora_keys_unet(model, key_map={}):
-    sdk = model.state_dict().keys()
+    sd = model.state_dict()
+    sdk = sd.keys()
 
     for k in sdk:
         if k.startswith("diffusion_model.") and k.endswith(".weight"):
             key_lora = k[len("diffusion_model."):-len(".weight")].replace(".", "_")
             key_map["lora_unet_{}".format(key_lora)] = k
+            key_map["lora_prior_unet_{}".format(key_lora)] = k #cascade lora: TODO put lora key prefix in the model config
 
     diffusers_keys = comfy.utils.unet_to_diffusers(model.model_config.unet_config)
     for k in diffusers_keys:
@@ -210,4 +245,17 @@ def model_lora_keys_unet(model, key_map={}):
                 if diffusers_lora_key.endswith(".to_out.0"):
                     diffusers_lora_key = diffusers_lora_key[:-2]
                 key_map[diffusers_lora_key] = unet_key
+
+    if isinstance(model, comfy.model_base.SD3): #Diffusers lora SD3
+        for i in range(model.model_config.unet_config.get("depth", 0)):
+            k = "transformer.transformer_blocks.{}.attn.".format(i)
+            qkv = "diffusion_model.joint_blocks.{}.x_block.attn.qkv.weight".format(i)
+            proj = "diffusion_model.joint_blocks.{}.x_block.attn.proj.weight".format(i)
+            if qkv in sd:
+                offset = sd[qkv].shape[0] // 3
+                key_map["{}to_q".format(k)] = (qkv, (0, 0, offset))
+                key_map["{}to_k".format(k)] = (qkv, (0, offset, offset))
+                key_map["{}to_v".format(k)] = (qkv, (0, offset * 2, offset))
+                key_map["{}to_out.0".format(k)] = proj
+
     return key_map

@@ -24,7 +24,7 @@ export function getPngMetadata(file) {
 				const length = dataView.getUint32(offset);
 				// Get the chunk type
 				const type = String.fromCharCode(...pngData.slice(offset + 4, offset + 8));
-				if (type === "tEXt") {
+				if (type === "tEXt" || type == "comf" || type === "iTXt") {
 					// Get the keyword
 					let keyword_end = offset + 8;
 					while (pngData[keyword_end] !== 0) {
@@ -33,7 +33,7 @@ export function getPngMetadata(file) {
 					const keyword = String.fromCharCode(...pngData.slice(offset + 8, keyword_end));
 					// Get the text
 					const contentArraySegment = pngData.slice(keyword_end + 1, offset + 8 + length);
-					const contentJson = Array.from(contentArraySegment).map(s=>String.fromCharCode(s)).join('')
+					const contentJson = new TextDecoder("utf-8").decode(contentArraySegment);
 					txt_chunks[keyword] = contentJson;
 				}
 
@@ -50,7 +50,6 @@ export function getPngMetadata(file) {
 function parseExifData(exifData) {
 	// Check for the correct TIFF header (0x4949 for little-endian or 0x4D4D for big-endian)
 	const isLittleEndian = new Uint16Array(exifData.slice(0, 2))[0] === 0x4949;
-	console.log(exifData);
 
 	// Function to read 16-bit and 32-bit integers from binary data
 	function readInt(offset, isLittleEndian, length) {
@@ -126,6 +125,9 @@ export function getWebpMetadata(file) {
 				const chunk_length = dataView.getUint32(offset + 4, true);
 				const chunk_type = String.fromCharCode(...webp.slice(offset, offset + 4));
 				if (chunk_type === "EXIF") {
+					if (String.fromCharCode(...webp.slice(offset + 8, offset + 8 + 6)) == "Exif\0\0") {
+						offset += 6;
+					}
 					let data = parseExifData(webp.slice(offset + 8, offset + 8 + chunk_length));
 					for (var key in data) {
 						var value = data[key];
@@ -168,9 +170,12 @@ export async function importA1111(graph, parameters) {
 		const opts = parameters
 			.substr(p)
 			.split("\n")[1]
-			.split(",")
+			.match(new RegExp("\\s*([^:]+:\\s*([^\"\\{].*?|\".*?\"|\\{.*?\\}))\\s*(,|$)", "g"))
 			.reduce((p, n) => {
 				const s = n.split(":");
+				if (s[1].endsWith(',')) {
+					s[1] = s[1].substr(0, s[1].length -1);
+				}
 				p[s[0].trim().toLowerCase()] = s[1].trim();
 				return p;
 			}, {});
@@ -189,6 +194,7 @@ export async function importA1111(graph, parameters) {
 			const vaeLoaderNode = LiteGraph.createNode("VAELoader");
 			const saveNode = LiteGraph.createNode("SaveImage");
 			let hrSamplerNode = null;
+			let hrSteps = null;
 
 			const ceil64 = (v) => Math.ceil(v / 64) * 64;
 
@@ -288,6 +294,9 @@ export async function importA1111(graph, parameters) {
 				model(v) {
 					setWidgetValue(ckptNode, "ckpt_name", v, true);
 				},
+				"vae"(v) {
+					setWidgetValue(vaeLoaderNode, "vae_name", v, true);
+				},
 				"cfg scale"(v) {
 					setWidgetValue(samplerNode, "cfg", +v);
 				},
@@ -314,6 +323,7 @@ export async function importA1111(graph, parameters) {
 					const h = ceil64(+wxh[1]);
 					const hrUp = popOpt("hires upscale");
 					const hrSz = popOpt("hires resize");
+					hrSteps = popOpt("hires steps");
 					let hrMethod = popOpt("hires upscaler");
 
 					setWidgetValue(imageNode, "width", w);
@@ -396,7 +406,7 @@ export async function importA1111(graph, parameters) {
 			}
 
 			if (hrSamplerNode) {
-				setWidgetValue(hrSamplerNode, "steps", getWidget(samplerNode, "steps").value);
+				setWidgetValue(hrSamplerNode, "steps", hrSteps? +hrSteps : getWidget(samplerNode, "steps").value);
 				setWidgetValue(hrSamplerNode, "cfg", getWidget(samplerNode, "cfg").value);
 				setWidgetValue(hrSamplerNode, "scheduler", getWidget(samplerNode, "scheduler").value);
 				setWidgetValue(hrSamplerNode, "sampler_name", getWidget(samplerNode, "sampler_name").value);
@@ -413,7 +423,7 @@ export async function importA1111(graph, parameters) {
 
 			graph.arrange();
 
-			for (const opt of ["model hash", "ensd"]) {
+			for (const opt of ["model hash", "ensd", "version", "vae hash", "ti hashes", "lora hashes", "hashes"]) {
 				delete opts[opt];
 			}
 
